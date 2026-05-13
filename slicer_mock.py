@@ -543,7 +543,12 @@ def _read_volume_file(path):
     if _is_nrrd(path):
         try:
             import vtkTeem
-            r = vtkTeem.vtkNRRDReader()
+            # In Slicer the class is named vtkTeemNRRDReader
+            ReaderClass = getattr(vtkTeem, "vtkTeemNRRDReader", None) \
+                          or getattr(vtkTeem, "vtkNRRDReader", None)
+            if ReaderClass is None:
+                raise ImportError("no NRRD reader in vtkTeem")
+            r = ReaderClass()
             r.SetFileName(path)
             r.Update()
             image = r.GetOutput()
@@ -617,7 +622,11 @@ def _save_volume(volumeNode, path):
     if _is_nrrd(path):
         try:
             import vtkTeem
-            w = vtkTeem.vtkNRRDWriter()
+            WriterClass = getattr(vtkTeem, "vtkTeemNRRDWriter", None) \
+                          or getattr(vtkTeem, "vtkNRRDWriter", None)
+            if WriterClass is None:
+                raise ImportError("no NRRD writer in vtkTeem")
+            w = WriterClass()
             w.SetInputData(image)
             w.SetFileName(path)
             ras_to_ijk = vtk.vtkMatrix4x4()
