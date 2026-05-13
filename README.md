@@ -27,10 +27,21 @@ The mock implements the surface most scripted Slicer modules need:
 | `slicer.util.WaitCursor` | `_MockUtil.WaitCursor` | Context-manager no-op |
 | `slicer.app` | `_MockApp` | Provides `.cachePath`, `.os`, `.processEvents()` |
 | `slicer.vtkSlicerTransformLogic` | `_MockVtkSlicerTransformLogic` | `hardenTransform` is a no-op by default — patch via `atlas_mock_extension.py` when needed |
+| `slicer.modules.segmentations.logic()` | `_MockSegmentationsLogic` | `ImportLabelmapToSegmentationNode`, `ExportSegmentsToLabelmapNode`, `ExportAllSegmentsToLabelmapNode` |
 | `slicer.ScriptedLoadableModule.*` | `object`-derived classes | All four base classes (Module, Widget, Logic, Test) |
 | Model node | `_MockModelNode` | `GetPolyData`, `GetMesh`, `SetAndObservePolyData`, `SetName`/`GetName`, `SetAndObserveTransformNodeID` |
 | Fiducial / markups node | `_MockFiducialNode` | `AddControlPoint`, `GetNthControlPointPosition`, label/description getters and setters |
 | Transform node | `_MockTransformNode` | `GetID`, `SetAndObserveTransformToParent` |
+| Scalar / label volume node | `_MockVolumeNode` | `GetImageData`, `SetAndObserveImageData`, `GetIJKToRASMatrix`, `GetIJKToRASDirectionMatrix`, `GetOrigin`/`SetOrigin`, `GetSpacing`/`SetSpacing`, `GetClassName` |
+| Segmentation node | `_MockSegmentationNode` | `GetSegmentation`, `SetReferenceImageGeometryParameterFromVolumeNode` |
+| Segment | `_MockSegment` | `GetName`, `GetColor`, `GetLabelValue`, internal `_labelmap` (vtkImageData) |
+| `slicer.util.loadVolume` | `_MockUtil.loadVolume` | NRRD (via vtkTeem if available, else pynrrd), NIfTI (vtkNIFTIImageReader), MHA (vtkMetaImageReader). Returns RAS-oriented IJK→RAS matrix |
+| `slicer.util.loadLabelVolume` | `_MockUtil.loadLabelVolume` | As above, labelled as label-map node |
+| `slicer.util.loadSegmentation` | `_MockUtil.loadSegmentation` | Loads a label volume and converts it to a single-or-multi-segment segmentation (one segment per unique label value) |
+| `slicer.util.arrayFromVolume` | `_MockUtil.arrayFromVolume` | Returns numpy view in K,J,I order (matches real Slicer) |
+| `slicer.util.updateVolumeFromArray` | `_MockUtil.updateVolumeFromArray` | Replaces volume scalars |
+| `slicer.util.arrayFromSegmentBinaryLabelmap` | `_MockUtil.arrayFromSegmentBinaryLabelmap` | Returns uint8 binary mask for one segment |
+| `slicer.util.updateSegmentBinaryLabelmapFromArray` | `_MockUtil.updateSegmentBinaryLabelmapFromArray` | Writes a binary mask back into a segment |
 | `qt`, `ctk` | Empty modules | `qt.QMessageBox`, `qt.QIcon`, `ctk.ctkPathLineEdit`, `ctk.ctkWidgetsUtils` stubs |
 
 The mock does **not** provide rendering, layouts, widget interaction, the subject hierarchy, DICOM I/O, or volume support. If your extension touches those it will fail; extend the mock.
@@ -119,6 +130,62 @@ markups = slicer.util.loadMarkups("/path/to/landmarks.mrk.json")
 arr = markups.as_numpy()                # numpy (N,3) in RAS
 ```
 
+### Loading volumes and accessing array data
+
+```python
+import slicer
+import numpy as np
+
+vol = slicer.util.loadVolume("/path/to/scan.nii.gz")
+arr = slicer.util.arrayFromVolume(vol)  # numpy view, K,J,I order, in scanner units
+
+# Modify in place
+arr[arr < 100] = 0
+slicer.util.arrayFromVolumeModified(vol)
+
+# Or replace wholesale with a new array
+new_arr = (arr > 200).astype(np.uint8) * 255
+slicer.util.updateVolumeFromArray(vol, new_arr)
+
+# Save back to disk
+slicer.util.saveNode(vol, "/path/to/output.nrrd")   # NRRD via vtkTeem
+slicer.util.saveNode(vol, "/path/to/output.nii.gz") # NIfTI with LPS qform/sform
+```
+
+Origin / spacing / direction:
+
+```python
+vol.GetOrigin()         # (Rx, Ay, Sz) in RAS
+vol.GetSpacing()        # (sx, sy, sz)
+m = vtk.vtkMatrix4x4(); vol.GetIJKToRASMatrix(m)
+m = vtk.vtkMatrix4x4(); vol.GetIJKToRASDirectionMatrix(m)  # rotation+scale, no translation
+```
+
+### Loading segmentations and accessing binary masks
+
+A label volume (a NIfTI / NRRD file where each voxel value identifies a segment) loads as a multi-segment segmentation, one segment per non-zero label value:
+
+```python
+seg = slicer.util.loadSegmentation("/path/to/labels.nii.gz")
+segment_ids = seg.GetSegmentation().GetSegmentIDs()
+for sid in segment_ids:
+    mask = slicer.util.arrayFromSegmentBinaryLabelmap(seg, sid)
+    # mask is a uint8 numpy array, 1 inside the segment, 0 outside
+    ...
+
+# Round-trip: convert segmentation back to a labelmap volume
+import slicer
+lmlogic = slicer.modules.segmentations.logic()
+labelmap = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLLabelMapVolumeNode", "tmp_lm")
+lmlogic.ExportAllSegmentsToLabelmapNode(seg, labelmap)
+slicer.util.saveNode(labelmap, "/path/to/exported_labels.nii.gz")
+
+# Or save the segmentation directly (uses the all-segments labelmap path internally)
+slicer.util.saveNode(seg, "/path/to/segmentation.nrrd")
+```
+
+`.seg.nrrd` (Slicer's multi-segment NRRD with embedded metadata) is **not** fully supported by the mock. The mock falls back to treating it as a generic label volume, which loses segment names / colors / multi-representation data. For full `.seg.nrrd` round-trip, run under real Slicer.
+
 ### Loading landmarks as numpy directly
 
 ```python
@@ -155,10 +222,13 @@ If your target extension calls something not in the table above, you have two op
 
 - No widget / UI interaction. Anything that requires button clicks, signals/slots, or a running Qt event loop will not work.
 - No subject hierarchy beyond a stub.
-- No volume nodes, DICOM I/O, or segmentation.
+- No DICOM I/O.
+- **`.seg.nrrd` multi-segment metadata is not preserved.** Segmentations load as labelmap-backed single/multi-segment nodes (one segment per unique label value); segment names, colors, and Slicer-specific metadata are lost on round-trip. Use real Slicer for `.seg.nrrd` work.
+- **NRRD support outside PythonSlicer requires `pynrrd`.** Under real PythonSlicer, `vtkTeem.vtkNRRDReader`/`vtkNRRDWriter` is used directly. Under plain Python the mock falls back to `pynrrd` if installed; if neither is available, NRRD I/O raises.
+- Volume coordinate handling assumes the NIfTI qform/sform is in LPS (the standard convention) and converts to RAS on read; MHA direction handling is identity by default (override the IJK→RAS matrix manually if you need precise MHA orientations).
 - The mock loads extension `.py` files from disk via `importlib`; it does not load Slicer extension manifests.
 - `_MockVtkSlicerTransformLogic.hardenTransform` is a **no-op by default**. If your code depends on transforms being applied to mesh vertices, patch this method (see `atlas_mock_extension.py`).
-- The LPS↔RAS handling assumes Slicer's PLY/MRK conventions. If your data lives in some other coordinate system, override `_MockUtil.loadModel` / `loadMarkups`.
+- The LPS↔RAS handling assumes Slicer's PLY/MRK/NIfTI conventions. If your data lives in some other coordinate system, override the load functions.
 
 ## When to use this
 
