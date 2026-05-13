@@ -28,6 +28,11 @@ The mock implements the surface most scripted Slicer modules need:
 | `slicer.app` | `_MockApp` | Provides `.cachePath`, `.os`, `.processEvents()` |
 | `slicer.vtkSlicerTransformLogic` | `_MockVtkSlicerTransformLogic` | `hardenTransform` is a no-op by default — patch via `atlas_mock_extension.py` when needed |
 | `slicer.modules.segmentations.logic()` | `_MockSegmentationsLogic` | `ImportLabelmapToSegmentationNode`, `ExportSegmentsToLabelmapNode`, `ExportAllSegmentsToLabelmapNode` |
+| `slicer.vtkMRMLMarkupsFiducialNode()` etc. | direct alias to mock classes | Direct instantiation pattern (`node = slicer.vtkMRMLMarkupsFiducialNode()`) is now supported alongside `slicer.mrmlScene.AddNewNodeByClass(...)`. Aliased: `vtkMRMLModelNode`, `vtkMRMLTransformNode`, `vtkMRMLSegmentationNode`, `vtkMRMLScalarVolumeNode`, `vtkMRMLLabelMapVolumeNode` |
+| `slicer.mrmlScene.AddNode(node)` | `_MockScene.AddNode` | Returns the node unchanged — matches real Slicer's behaviour |
+| `slicer.util.messageBox` / `confirmYesNoDisplay` / `delayDisplay` | `_MockUtil` | No-op stubs that print to stderr; required so error paths in SlicerMorph's GPA module don't crash headless runs |
+| `slicer.util.getFirstNodeByName(name)` | `_MockUtil.getFirstNodeByName` | Module-level alias for `slicer.mrmlScene.GetFirstNodeByName` |
+| `qt.QObject`, `QEvent`, `Qt`, `QWidget`, `QLabel`, `QPushButton`, `QLineEdit`, `QTabWidget`, `QFileDialog`, `QColor`, `QUrl`, `QDesktopServices` | empty classes / namespaces | Enough for `class _PCAPlotMouseFilter(qt.QObject):` and similar top-level class definitions in SlicerMorph modules to be importable without instantiating any UI |
 | `slicer.ScriptedLoadableModule.*` | `object`-derived classes | All four base classes (Module, Widget, Logic, Test) |
 | Model node | `_MockModelNode` | `GetPolyData`, `GetMesh`, `SetAndObservePolyData`, `SetName`/`GetName`, `SetAndObserveTransformNodeID` |
 | Fiducial / markups node | `_MockFiducialNode` | `AddControlPoint`, `GetNthControlPointPosition`, label/description getters and setters |
@@ -215,6 +220,19 @@ landmarks = load_lm_numpy("/path/to/landmarks.mrk.json")  # (N,3) numpy in RAS
 from slicer_mock import rmse
 err = rmse(landmarks_a, landmarks_b)
 ```
+
+### Running SlicerMorph's GPA module headlessly
+
+GPA's GUI button handler (`GPAWidget.onLoad`) mixes the analysis with widget setup, layout assignment, 3D-camera zoom, and scatter-plot wiring — it cannot be driven from a script. The analysis core, however, is pure numpy and lives in two places that the mock supports cleanly:
+
+- `GPALogic.loadLandmarks(file_paths, exclude_indices, "mrk.json")` reads `.mrk.json` files into a `(n_landmarks, 3, n_subjects)` array.
+- `LMData.doGpa()` / `calcEigen()` / `writeOutData()` runs Procrustes + PCA + emits the same five CSVs the GUI writes (`outputData.csv`, `meanShape.csv`, `eigenvalues.csv`, `eigenvector.csv`, `pcScores.csv`).
+
+The mock supplies enough qt/slicer surface for `GPA.py` to import cleanly, plus the `slicer.util.messageBox` / `confirmYesNoDisplay` / `delayDisplay` stubs that GPA's error paths call.
+
+See `examples/test_gpa_headless.py` for an end-to-end run that loads landmark files, applies a stock GPA + PCA, and writes the five CSVs — verified against `/tmp/gpa_results_fem/exp_001/pcd` (21 specimens × 568 landmarks). Note that GPA's loader requires `positionStatus: "defined"` per control point; landmark files produced outside Slicer (e.g. ALPACA's `matchingPCD`) often omit it — the example patches a temp-dir copy of each file to add the missing field so GPA's loader is happy.
+
+What is *not* supported in the mock: the PC slider / TPS warp visualisation, the interactive PCA scatter plot, and the "load previous results" replay (`onLoadFromFile`). These are inherent constraints of the GPA module's UI-driven design.
 
 ## Extending the mock
 

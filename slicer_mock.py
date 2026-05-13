@@ -291,6 +291,10 @@ class _MockScene:
         if "VolumeNode"         in cls_name: return _MockVolumeNode(name=name, node_class=cls_name)
         return types.SimpleNamespace()
 
+    def AddNode(self, node):
+        # slicer.mrmlScene.AddNode(node) returns the same node in real Slicer
+        return node
+
     def RemoveNode(self, node): pass
 
     def GetFirstNodeByName(self, n): return None
@@ -522,6 +526,25 @@ class _MockUtil:
     @staticmethod
     def infoDisplay(msg):
         print("INFO:", msg)
+
+    @staticmethod
+    def messageBox(msg, *a, **kw):
+        # GPA.loadLandmarks uses this on error paths. Never block in headless.
+        print(f"[messageBox] {msg}", file=sys.stderr)
+
+    @staticmethod
+    def confirmYesNoDisplay(msg, *a, **kw):
+        print(f"[confirmYesNo] {msg}", file=sys.stderr)
+        return True
+
+    @staticmethod
+    def delayDisplay(msg, *a, **kw):
+        print(f"[delayDisplay] {msg}", file=sys.stderr)
+
+    @staticmethod
+    def getFirstNodeByName(name):
+        # Mirrors slicer.mrmlScene.GetFirstNodeByName for the module-level helper
+        return None
 
     class WaitCursor:
         def __enter__(self): return self
@@ -843,6 +866,13 @@ def install(alpaca_py_path):
     slicer_mock.util                    = _MockUtil
     slicer_mock.app                     = _MockApp()
     slicer_mock.vtkSlicerTransformLogic = _MockVtkSlicerTransformLogic
+    # Allow direct instantiation: slicer.vtkMRMLMarkupsFiducialNode()
+    slicer_mock.vtkMRMLMarkupsFiducialNode = _MockFiducialNode
+    slicer_mock.vtkMRMLModelNode           = _MockModelNode
+    slicer_mock.vtkMRMLTransformNode       = _MockTransformNode
+    slicer_mock.vtkMRMLSegmentationNode    = _MockSegmentationNode
+    slicer_mock.vtkMRMLScalarVolumeNode    = _MockVolumeNode
+    slicer_mock.vtkMRMLLabelMapVolumeNode  = _MockVolumeNode
     for sub in ("qMRMLUtils", "customLayoutSM",
                 "customLayoutTableOnly", "customLayoutPlotOnly"):
         setattr(slicer_mock, sub, types.SimpleNamespace())
@@ -859,6 +889,23 @@ def install(alpaca_py_path):
         information=lambda *a, **kw: None,
     )
     qt_mock.QIcon = lambda *a: None
+    # Minimal qt class stubs needed so SlicerMorph modules import cleanly.
+    # None of these need real behaviour — they only need to exist as classes/
+    # namespaces because GPA.py and similar reference them at module load
+    # (class _PCAPlotMouseFilter(qt.QObject), qt.QEvent.MouseButtonPress, ...).
+    qt_mock.QObject          = type("QObject", (), {})
+    qt_mock.QWidget          = type("QWidget", (), {})
+    qt_mock.QLabel           = type("QLabel", (), {})
+    qt_mock.QPushButton      = type("QPushButton", (), {})
+    qt_mock.QLineEdit        = type("QLineEdit", (), {})
+    qt_mock.QTabWidget       = type("QTabWidget", (), {})
+    qt_mock.QFileDialog      = type("QFileDialog", (), {})
+    qt_mock.QColor           = type("QColor", (), {})
+    qt_mock.QUrl             = type("QUrl", (), {})
+    qt_mock.QDesktopServices = type("QDesktopServices", (), {})
+    qt_mock.QEvent           = types.SimpleNamespace(
+        MouseButtonPress=2, MouseMove=5, MouseButtonRelease=3)
+    qt_mock.Qt               = types.SimpleNamespace(LeftButton=1, RightButton=2)
 
     ctk_mock = types.ModuleType("ctk")
     ctk_mock.ctkPathLineEdit = types.SimpleNamespace(Dirs=0, Files=1)
