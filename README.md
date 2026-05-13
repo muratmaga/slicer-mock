@@ -47,6 +47,32 @@ git clone https://github.com/muratmaga/slicer-mock.git
 
 Then put the directory on your `sys.path` (or use it directly via absolute path).
 
+## Running the script
+
+This mock provides only the `slicer`, `qt`, and `ctk` API surface. It does **not** provide `vtk`, `itk`, `numpy`, `scipy`, `cpdalp`, or any other Slicer-bundled native dependency. Those must be importable from the Python interpreter you launch.
+
+The intended way is to **run your script under Slicer's bundled `PythonSlicer` interpreter**, which already ships with the full Slicer dependency stack including the SlicerMorph-required versions of `itk-fpfh` and `itk-ransac`:
+
+```bash
+# Plain Python interpreter — VTK/ITK/numpy/etc. available, `slicer` is NOT
+/path/to/Slicer-5.X.X-linux-amd64/bin/PythonSlicer my_headless_script.py
+
+# Or via Slicer in no-GUI mode — `slicer` IS available natively, mock unnecessary
+/path/to/Slicer-5.X.X-linux-amd64/Slicer --no-main-window --python-script my_script.py
+```
+
+On a SLURM cluster the pattern is typically:
+
+```bash
+#!/bin/bash
+#SBATCH ...
+ALPACA_DIR=/path/to/ALPACA
+SLICER_BIN=/path/to/Slicer/bin/PythonSlicer
+bash "${SLICER_BIN}" "${ALPACA_DIR}/my_headless_script.py"
+```
+
+You can also run under any other Python install that has `vtk`, `itk`, `itk-fpfh`, `itk-ransac`, `numpy`, `scipy`, and `cpdalp` available — but you lose Slicer-specific VTK behaviour (e.g. the automatic `SPACE=LPS` header on PLY writes) and extension code that depends on the SlicerMorph patched VTK will misbehave. **Prefer PythonSlicer** unless you have a specific reason not to.
+
 ## Usage
 
 The minimal headless bootstrap, before any Slicer-extension-related import:
