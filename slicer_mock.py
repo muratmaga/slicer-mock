@@ -195,12 +195,25 @@ class _MockSegmentationNode:
 
 # ── Segmentations logic (slicer.modules.segmentations.logic()) ────────────────
 
+def _segment_color(index):
+    """Generate a distinct, deterministic RGB color from an integer index.
+
+    Uses the golden-ratio hue sequence in HSV space, which produces visually
+    well-separated colors regardless of how many segments are present.
+    Equivalent to the approach Slicer uses for auto-generated segment colors.
+    """
+    import colorsys
+    hue = (index * 0.6180339887498949) % 1.0    # golden-ratio conjugate
+    return colorsys.hsv_to_rgb(hue, 0.6, 0.95)
+
+
 class _MockSegmentationsLogic:
     """Minimal stand-in for slicer.modules.segmentations.logic()."""
 
     @staticmethod
     def ImportLabelmapToSegmentationNode(labelmapNode, segmentationNode, terminologyContextName=""):
-        """Convert each unique non-zero label value into a segment."""
+        """Convert each unique non-zero label value into a segment, each
+        receiving a distinct auto-generated color."""
         img = labelmapNode.GetImageData()
         if img is None:
             return False
@@ -208,9 +221,10 @@ class _MockSegmentationsLogic:
         labelmapNode.GetIJKToRASMatrix(ijk_to_ras)
         from vtk.util.numpy_support import vtk_to_numpy
         arr = vtk_to_numpy(img.GetPointData().GetScalars())
-        for label in [int(v) for v in np.unique(arr) if v != 0]:
+        for i, label in enumerate([int(v) for v in np.unique(arr) if v != 0]):
             seg = _MockSegment(segment_id=f"Segment_{label}",
-                               name=f"Segment_{label}")
+                               name=f"Segment_{label}",
+                               color=_segment_color(i))
             seg._labelmap = img
             seg._labelmap_ijk_to_ras = ijk_to_ras
             seg._label_value = label
