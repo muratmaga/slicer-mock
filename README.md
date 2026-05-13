@@ -46,9 +46,25 @@ The mock implements the surface most scripted Slicer modules need:
 
 The mock does **not** provide rendering, layouts, widget interaction, the subject hierarchy, DICOM I/O, or volume support. If your extension touches those it will fail; extend the mock.
 
-## Coordinate system handling
+## Coordinate system handling — important
 
-3D Slicer uses RAS internally and writes PLY/MRK files in LPS by convention. The mock's `loadModel` applies an LPS→RAS flip (negate X and Y) on read so downstream code receives RAS coordinates exactly as in real Slicer; `loadMarkups` and `saveNode` do the same on the markups side. **If your code writes PLY files via `vtkPLYWriter` directly (not via `slicer.util.saveNode`)**, be aware that Slicer's vtkPLYWriter also applies a RAS→LPS flip on write — your output will be in LPS coordinates with a `SPACE=LPS` header. Both conventions are preserved by the mock so existing pipelines continue to work.
+3D Slicer uses **RAS** internally and stores PLY / MRK / NIfTI / NRRD on disk in **LPS** by convention. Mishandling this is the #1 cause of mesh / volume / landmark files loading in Slicer with the X / Y axes flipped (left-right mirror, anterior-posterior swap). The mock handles the conversion consistently across all file I/O:
+
+| Operation | What the mock does |
+|---|---|
+| `slicer.util.loadModel(path)` (PLY/VTK/VTP/OBJ) | Read raw bytes, then **flip X, Y** so downstream code receives a RAS-oriented mesh |
+| `slicer.util.saveNode(modelNode, "*.ply")` | **Flip X, Y back to LPS, write a `comment SPACE=LPS` header**, then `vtkPLYWriter`. Slicer (and any Slicer-aware reader) loads the result at the correct anatomical position |
+| `slicer.util.loadMarkups(path)` (`.fcsv`, `.mrk.json`) | LPS→RAS flip on read, honouring the `coordinateSystem` field in `.mrk.json` |
+| `slicer.util.saveNode(markupsNode, "*.mrk.json")` | RAS→LPS flip on write, sets `"coordinateSystem": "LPS"` in JSON |
+| `slicer.util.loadVolume(path)` (NRRD) | Via `vtkTeem.vtkTeemNRRDReader` which yields a RAS-IJK matrix directly — no extra flip needed |
+| `slicer.util.loadVolume(path)` (NIfTI) | Read qform/sform (LPS by convention), negate rows 0/1 → IJK→RAS matrix in RAS |
+| `slicer.util.saveNode(volumeNode, "*.nrrd")` | Via `vtkTeemNRRDWriter` with the RAS IJK matrix |
+| `slicer.util.saveNode(volumeNode, "*.nii.gz")` | Convert IJK→RAS back to LPS for the qform/sform on disk |
+| `slicer.util.saveNode(segNode, "*.seg.nrrd")` | NRRD label volume + Slicer segmentation metadata (`Segmentation_MasterRepresentation`, `Segment*_ID/Name/Color/LabelValue/Layer/Extent/Tags`) — recognised by Slicer as a segmentation rather than a label volume |
+
+**The rule of thumb:** call `slicer.util.saveNode(node, path)` instead of raw `vtkPLYWriter`, `vtkNIFTIImageWriter`, etc. The mock's `saveNode` dispatches on node type and applies the correct flip + header conventions for each output format. Calling the raw VTK writers directly skips all that and produces files that Slicer will load at the wrong orientation.
+
+If you must use the raw writers (e.g. for a workflow Slicer doesn't natively handle), reproduce the conversion explicitly: for PLY output of RAS-oriented coordinates, flip X and Y, and write a `comment SPACE=LPS` header before `end_header`. Slicer will then load the file correctly.
 
 ## Installation
 

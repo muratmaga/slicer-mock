@@ -343,6 +343,9 @@ class _MockUtil:
 
     @staticmethod
     def saveNode(node, path):
+        # Model node (mesh) → PLY/VTK/VTP/OBJ with RAS→LPS flip for PLY
+        if isinstance(node, _MockModelNode):
+            return _save_model(node, path)
         # Fiducial markups → .mrk.json (RAS→LPS flip applied)
         if isinstance(node, _MockFiducialNode):
             cps = [
@@ -376,6 +379,9 @@ class _MockUtil:
                 node, tmp_lm, node._reference_volume)
             if not ok:
                 return False
+            # .seg.nrrd: write as NRRD with Slicer segmentation key/value pairs
+            if path.lower().endswith(".seg.nrrd"):
+                return _save_seg_nrrd(node, tmp_lm, path)
             return _save_volume(tmp_lm, path)
         return False
 
@@ -608,6 +614,120 @@ def _read_volume_file(path):
         ijk_to_ras = _matrix_lps_to_ras(ijk_to_ras_lps)
         return image, ijk_to_ras
     raise RuntimeError(f"Unsupported volume format: {path}")
+
+
+def _save_model(modelNode, path):
+    """Write a model node to PLY/VTK/VTP/OBJ. For PLY, applies the RAS→LPS
+    flip and emits a `comment SPACE=LPS` header so Slicer (and any other
+    Slicer-aware consumer) loads the mesh at the correct anatomical
+    orientation. Other formats are written raw."""
+    poly = modelNode.GetPolyData() if hasattr(modelNode, "GetPolyData") else None
+    if poly is None:
+        return False
+    ext = os.path.splitext(path)[1].lower()
+    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+    if ext == ".ply":
+        from vtk.util.numpy_support import vtk_to_numpy, numpy_to_vtk
+        arr = vtk_to_numpy(poly.GetPoints().GetData()).copy()
+        arr[:, 0] *= -1
+        arr[:, 1] *= -1
+        flipped = vtk.vtkPolyData()
+        flipped.DeepCopy(poly)
+        new_pts = vtk.vtkPoints()
+        new_pts.SetData(numpy_to_vtk(np.ascontiguousarray(arr, dtype=np.float64), deep=True))
+        flipped.SetPoints(new_pts)
+        w = vtk.vtkPLYWriter()
+        w.SetFileName(path)
+        w.SetInputData(flipped)
+        w.SetFileTypeToBinary()
+        # vtkPLYWriter has AddComment in recent VTK; if absent, write a temp
+        # file and patch in the comment by hand.
+        added = False
+        try:
+            w.AddComment("SPACE=LPS")
+            added = True
+        except Exception:
+            pass
+        w.Write()
+        if not added:
+            # Inject "comment SPACE=LPS" into the header after the ply line
+            with open(path, "rb") as f:
+                raw = f.read()
+            he = raw.find(b"end_header")
+            hdr = raw[:he].decode("ascii", errors="ignore")
+            if "SPACE=LPS" not in hdr:
+                lines = hdr.splitlines()
+                # Insert after the line starting with "comment VTK" if present,
+                # otherwise after the format line
+                idx = next((i for i, l in enumerate(lines) if l.startswith("comment VTK")), 1)
+                lines.insert(idx + 1, "comment SPACE=LPS")
+                new_hdr = ("\n".join(lines) + "\n").encode("ascii")
+                with open(path, "wb") as f:
+                    f.write(new_hdr)
+                    f.write(b"end_header\n")
+                    f.write(raw[he + len("end_header") + 1:])
+        return True
+    if ext == ".vtk":
+        w = vtk.vtkPolyDataWriter()
+        w.SetFileName(path); w.SetInputData(poly); w.Write()
+        return True
+    if ext == ".vtp":
+        w = vtk.vtkXMLPolyDataWriter()
+        w.SetFileName(path); w.SetInputData(poly); w.Write()
+        return True
+    if ext == ".obj":
+        w = vtk.vtkOBJWriter()
+        w.SetFileName(path); w.SetInputData(poly); w.Write()
+        return True
+    raise RuntimeError(f"Unsupported model write format: {path}")
+
+
+def _save_seg_nrrd(segmentationNode, labelmapNode, path):
+    """Write a Slicer .seg.nrrd: NRRD label volume + per-segment metadata
+    keys (Segment0_*, Segmentation_*) as custom NRRD attributes."""
+    image = labelmapNode.GetImageData()
+    if image is None:
+        return False
+    ijk_to_ras = vtk.vtkMatrix4x4()
+    labelmapNode.GetIJKToRASMatrix(ijk_to_ras)
+    try:
+        import vtkTeem
+        WriterClass = getattr(vtkTeem, "vtkTeemNRRDWriter", None) \
+                      or getattr(vtkTeem, "vtkNRRDWriter", None)
+        if WriterClass is None:
+            raise ImportError("no NRRD writer in vtkTeem")
+        w = WriterClass()
+        w.SetInputData(image)
+        w.SetFileName(path)
+        w.SetIJKToRASMatrix(ijk_to_ras)
+        # Slicer segmentation metadata
+        w.SetAttribute("Segmentation_ContainedRepresentationNames", "Binary labelmap|")
+        w.SetAttribute("Segmentation_MasterRepresentation", "Binary labelmap")
+        w.SetAttribute("Segmentation_ReferenceImageExtentOffset", "0 0 0")
+        w.SetAttribute("Segmentation_ConversionParameters", "")
+        seg_ids = segmentationNode.GetSegmentation().GetSegmentIDs()
+        for idx, sid in enumerate(seg_ids):
+            seg = segmentationNode.GetSegmentation().GetSegment(sid)
+            r, g, b = seg.GetColor()
+            w.SetAttribute(f"Segment{idx}_ID", sid)
+            w.SetAttribute(f"Segment{idx}_Name", seg.GetName())
+            w.SetAttribute(f"Segment{idx}_NameAutoGenerated", "1")
+            w.SetAttribute(f"Segment{idx}_Color", f"{r:.6f} {g:.6f} {b:.6f}")
+            w.SetAttribute(f"Segment{idx}_ColorAutoGenerated", "1")
+            w.SetAttribute(f"Segment{idx}_LabelValue", str(seg.GetLabelValue()))
+            w.SetAttribute(f"Segment{idx}_Layer", "0")
+            w.SetAttribute(f"Segment{idx}_Extent", "0 0 0 0 0 0")
+            w.SetAttribute(f"Segment{idx}_Tags",
+                           "TerminologyEntry:Segmentation category and type - 3D Slicer General Anatomy list~"
+                           "SCT^85756007^Tissue~SCT^85756007^Tissue~^^~Anatomic codes - DICOM master list~"
+                           "^^~^^|")
+        w.Write()
+        return True
+    except ImportError:
+        # No vtkTeem — fall back to plain NRRD via pynrrd (no Slicer-specific
+        # segmentation metadata in that case; the file will load as a label
+        # volume rather than a segmentation in Slicer)
+        return _save_volume(labelmapNode, path)
 
 
 def _save_volume(volumeNode, path):

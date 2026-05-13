@@ -123,21 +123,21 @@ for sid in seg_ids[:5]:
 if len(seg_ids) > 5:
     print(f"      ... and {len(seg_ids)-5} more")
 
-# ── 7. Save segmentation to disk via slicer.util.saveNode ─────────────────────
-print("\n[7] Saving segmentation ...")
-seg_path = os.path.join(OUT, "islands_segmentation.nrrd")
+# ── 7. Save segmentation to disk as .seg.nrrd ─────────────────────────────────
+print("\n[7] Saving segmentation as .seg.nrrd ...")
+seg_path = os.path.join(OUT, "islands.seg.nrrd")
 ok = slicer.util.saveNode(seg_node, seg_path)
 print(f"    saveNode returned: {ok}")
 if os.path.exists(seg_path):
     print(f"    saved {seg_path} ({os.path.getsize(seg_path):,} bytes)")
 
 # ── 8. Convert each segment to a PLY surface ─────────────────────────────────
-print("\n[8] Converting segments to 3D PLY models ...")
+print("\n[8] Converting segments to 3D PLY models (via slicer.util.saveNode) ...")
 for sid in seg_ids:
     seg = seg_node.GetSegmentation().GetSegment(sid)
     if seg._labelmap is None:
         continue
-    # Marching cubes on the segment's binary labelmap
+    # Marching cubes on the segment's binary labelmap (IJK space)
     mc = vtk.vtkDiscreteMarchingCubes()
     mc.SetInputData(seg._labelmap)
     mc.SetValue(0, seg.GetLabelValue())
@@ -153,14 +153,13 @@ for sid in seg_ids:
     tf.SetTransform(tx)
     tf.SetInputData(surf)
     tf.Update()
-    # Write PLY (Slicer's vtkPLYWriter handles RAS→LPS automatically; under
-    # plain VTK we write raw RAS coordinates without a SPACE header)
+    # Wrap in a model node and write via slicer.util.saveNode — that path
+    # applies the RAS→LPS flip and adds the SPACE=LPS header so the PLY
+    # loads correctly in Slicer alongside the source volume
+    model = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLModelNode", sid)
+    model.SetAndObservePolyData(tf.GetOutput())
     out_ply = os.path.join(OUT, f"{sid}.ply")
-    w = vtk.vtkPLYWriter()
-    w.SetFileName(out_ply)
-    w.SetInputData(tf.GetOutput())
-    w.SetFileTypeToBinary()
-    w.Write()
+    slicer.util.saveNode(model, out_ply)
     print(f"    {sid}: {tf.GetOutput().GetNumberOfPoints():,} verts  →  {out_ply}")
 
 print(f"\nDone. All outputs in {OUT}/")
